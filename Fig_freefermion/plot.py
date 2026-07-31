@@ -630,7 +630,7 @@ ax_top.plot(
     markersize=7,
     linewidth=1.9,
     color="royalblue",
-    label=r"$\boldsymbol{S_0}$",
+    label=r"$\boldsymbol{S_{\mathrm{id}}}$",
 )
 
 ax_top.plot(
@@ -701,7 +701,7 @@ ax_bottom.plot(
     markersize=7,
     linewidth=1.9,
     color="royalblue",
-    label=r"$\boldsymbol{S_0}$",
+    label=r"$\boldsymbol{S_{\mathrm{id}}}$",
 )
 
 ax_bottom.plot(
