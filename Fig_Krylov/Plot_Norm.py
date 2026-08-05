@@ -152,7 +152,7 @@ for ax in axes[1, :]:
 for ax in axes[:, 0]:
     ax.set_ylabel(
         r'$\boldsymbol{'
-        r'\left\|\Delta(J_a)-\Delta_m(J_a)\right\|'
+        r'\varepsilon_{\max}'
         r'}$'
     )
 

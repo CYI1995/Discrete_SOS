@@ -1,210 +1,302 @@
-import numpy  as np
-import scipy
-import math
+"""
+Krylov (Lanczos) approximation of the modular flow
+
+    Delta^{s}(J) = exp(x ad_H)(J),   ad_H(X) = H X - X H,   x = beta/4,
+
+benchmarked against the exact eigendecomposition result.
+
+Key structural points
+---------------------
+* The Krylov space K_m(ad_H, J) does NOT depend on x.  The Lanczos run is
+  therefore performed once per (H, J) pair at m = max(m_list), and every
+  (beta, m) pair is obtained by exponentiating a small tridiagonal matrix.
+  This replaces  n_beta * n_m  Lanczos runs by a single one.
+* Lanczos is nested: the leading k x k block of T from an m-step run equals
+  the T of a k-step run (exactly so with full reorthogonalization, since the
+  recurrence at step j only ever touches basis vectors 0..j).
+* Everything is evaluated with the global factor exp(-x * W) pulled out,
+  W = lambda_max - lambda_min being the spectral width of H.  Both the exact
+  and the Krylov result carry the same factor, so the *relative* error is
+  unaffected while the intermediate matrices stay O(1) instead of
+  overflowing float64 at large beta.
+"""
+
+import numpy as np
 import scipy.linalg as la
-import matplotlib
-from matplotlib import pyplot as plt 
-import source as mycode 
 
-def generate_all_majoranas(n_sites):
+import source as mycode
+
+
+# ----------------------------------------------------------------------
+# Linear algebra helpers
+# ----------------------------------------------------------------------
+
+def matrix_norm(M):
+    """Spectral norm (largest singular value).
+
+    Computed by SVD rather than via eigvalsh(M^dag M): forming M^dag M
+    squares the dynamic range and overflows to inf/nan whenever
+    ||M|| exceeds ~1e154.
     """
-    Generates all 2N Majorana operators for a system of n_sites.
-    Returns: A list of 2N NumPy arrays.
-    """
-    majoranas = []
-    
-    # Fundamental 2x2 building blocks
-    d = np.array([[0, 1], [0, 0]])
-    z = np.array([[1, 0], [0, -1]])
-    eye = np.eye(2)
+    return la.norm(M, 2)
 
-    for j in range(n_sites):
-        # Construct the annihilation operator c_j for the current site
-        # c_j = Z^0 \otimes Z^1 \otimes ... \otimes d^j \otimes I^{j+1} ...
-        c_j = np.array([[1]]) # Start with a scalar for the Kronecker product
-        
-        for i in range(n_sites):
-            if i < j:
-                c_j = np.kron(c_j, z)
-            elif i == j:
-                c_j = np.kron(c_j, d)
-            else:
-                c_j = np.kron(c_j, eye)
-        
-        # Site j provides two Majorana operators: 
-        # m = 2j (gamma_a) and m = 2j + 1 (gamma_b)
-        g_even = c_j + c_j.conj().T          # gamma_{2j}
-        g_odd = -1j * (c_j - c_j.conj().T)   # gamma_{2j+1}
-        
-        majoranas.append(g_even)
-        majoranas.append(g_odd)
-        
-    return majoranas
 
-def op_inner_product(X, Y):
+def hs_inner_product(X, Y):
+    """Hilbert-Schmidt inner product Tr(X^dag Y)."""
     return np.vdot(X, Y)
 
-def op_norm(X):
-    return np.linalg.norm(X)
 
-def Krylov_estimation(m, ham, x, opt, tol=1e-7):
+def hs_norm(X):
+    """Hilbert-Schmidt / Frobenius norm."""
+    return la.norm(X, ord="fro")
+
+
+# ----------------------------------------------------------------------
+# Lanczos on operator space  (independent of x)
+# ----------------------------------------------------------------------
+
+def lanczos_tridiag(m, ham, opt, tol=1e-12, reorthogonalize=True):
+    r"""
+    Lanczos iteration for the self-adjoint superoperator ad_H acting on
+    operator space with the Hilbert-Schmidt inner product, started from
+    opt / ||opt||_HS.
+
+    Parameters
+    ----------
+    m : int
+        Maximum Krylov dimension.
+    ham : ndarray (d, d)
+        Hermitian Hamiltonian.
+    opt : ndarray (d, d)
+        Starting operator.
+    tol : float
+        Relative breakdown tolerance for the off-diagonal coefficients.
+    reorthogonalize : bool
+        Two-pass full reorthogonalization against the stored basis.
+
+    Returns
+    -------
+    basis : ndarray (k, d, d)
+        Orthonormal Krylov basis, k <= m.
+    alphas : ndarray (k,)
+        Diagonal of the projected tridiagonal matrix T.
+    betas : ndarray (k - 1,)
+        Off-diagonal of T.
+    norm_opt : float
+        ||opt||_HS, the factor removed from the starting vector.
     """
-    Lanczos-Krylov subspace estimation for operator exponential: exp(x * [ham, ·]) (opt)
-    Standard implementation for quantum operator Lie algebra propagation
-    
-    Parameters:
-        m (int): Max Krylov subspace dimension
-        ham (np.ndarray): Hamiltonian (square matrix)
-        opt (np.ndarray): Target operator (same size as ham)
-        tol (float): Convergence tolerance for Lanczos steps
-    
-    Returns:
-        np.ndarray: Krylov-approximated exponentiated operator
-    """
-    # Get dimension (fixes undefined 'd')
-    d = ham.shape[0]
-    
-    # --------------------------
-    # Step 1: Initial Lanczos step
-    # --------------------------
-    # Commutator: [ham, opt] = ham @ opt - opt @ ham
-    norm_opt = op_norm(opt)
-    opt = opt/norm_opt
-    A1 = ham @ opt - opt @ ham
-    a1 = op_inner_product(opt, A1).real
-    B1 = A1 - a1 * opt
+    ham = np.asarray(ham, dtype=complex)
+    opt = np.asarray(opt, dtype=complex)
 
-    b1 = op_norm(B1)
+    if not isinstance(m, (int, np.integer)) or m < 1:
+        raise ValueError("m must be a positive integer.")
+    if ham.ndim != 2 or ham.shape[0] != ham.shape[1]:
+        raise ValueError("ham must be a square matrix.")
+    if opt.shape != ham.shape:
+        raise ValueError("opt and ham must have the same shape.")
+    if not np.allclose(ham, ham.conj().T, atol=1e-12, rtol=1e-12):
+        raise ValueError(
+            "ham must be Hermitian: Lanczos requires ad_H to be self-adjoint."
+        )
 
-    # Initialize lists
-    a_list = [a1]
-    b_list = [b1]
-    Obs_list = [opt]  # Krylov basis vectors
+    norm_opt = hs_norm(opt)
+    if norm_opt == 0.0:
+        return (
+            np.zeros((0,) + opt.shape, dtype=complex),
+            np.zeros(0),
+            np.zeros(0),
+            0.0,
+        )
 
-    # Normalize first basis element
-    if b1 > tol:
-        B1 = B1 / b1
-    else:
-        B1 = np.zeros_like(opt)
+    # ||ad_H||_HS <= 2 ||H||_2 sets the natural scale for all coefficients.
+    lanczos_scale = max(1.0, 2.0 * la.norm(ham, 2))
 
-    Obs_list.append(B1)
-    B_pre = opt.copy()
-    B_curr = B1.copy()
-    old_b = b1
+    q = opt / norm_opt
+    q_prev = np.zeros_like(q)
+    beta_prev = 0.0
 
-    # --------------------------
-    # Step 2: Lanczos iteration (FIXED loop range)
-    # --------------------------
-    # Iterate to build m-dimensional subspace (range(m-1) fixes overcounting)
-    for t in range(m - 1):
-        # Commutator with HAM (fixed H0 -> ham mismatch)
-        A_temp = ham @ B_curr - B_curr @ ham
-        a_temp = op_inner_product(B_curr, A_temp).real
-        
-        # 3-term Lanczos recurrence
-        B_next = A_temp - a_temp * B_curr - old_b * B_pre
-        next_b = op_norm(B_next)
-        
-        # Store coefficients
-        a_list.append(a_temp)
-        b_list.append(next_b)
-        
-        # Normalize & advance basis
-        if next_b > tol:
-            B_next = B_next / next_b
-            Obs_list.append(B_next)
-            B_pre = B_curr.copy()
-            B_curr = B_next.copy()
-            old_b = next_b
-        else:
-            print(f"Krylov subspace closed at step {t}")
+    basis = []
+    alphas = []
+    betas = []
+
+    for j in range(m):
+        basis.append(q.copy())
+
+        z = ham @ q - q @ ham          # z = ad_H(q_j)
+        if j > 0:
+            z -= beta_prev * q_prev
+
+        alpha = hs_inner_product(q, z)
+
+        # ad_H self-adjoint  =>  alpha real.  The tolerance is set by the
+        # norm of the operator, not by |alpha| itself, which may vanish.
+        if abs(alpha.imag) > 1e-10 * lanczos_scale:
+            raise RuntimeError(
+                f"Lanczos diagonal coefficient alpha[{j}] = {alpha} has a "
+                "significant imaginary part."
+            )
+
+        alpha = float(alpha.real)
+        z -= alpha * q
+
+        if reorthogonalize:
+            for _ in range(2):
+                for q_old in basis:
+                    z -= hs_inner_product(q_old, z) * q_old
+
+        alphas.append(alpha)
+
+        if j == m - 1:
             break
 
-    # --------------------------
-    # Step 3: Build tridiagonal Lanczos matrix
-    # --------------------------
-    L = len(a_list)
-    MatLanczos = np.zeros((L, L), dtype=complex)
-    for l in range(L - 1):
-        MatLanczos[l, l] = a_list[l]
-        MatLanczos[l, l + 1] = b_list[l]
-        MatLanczos[l + 1, l] = b_list[l]
-    MatLanczos[L - 1, L - 1] = a_list[L - 1]
+        beta = hs_norm(z)
+        if beta <= tol * lanczos_scale:      # invariant subspace reached
+            break
 
-    # --------------------------
-    # Step 4: Compute Krylov approximation
-    # --------------------------
-    v0 = np.zeros(L, dtype=complex)
-    v0[0] = 1.0
-    
-    # Exponentiate small Lanczos matrix
-    vecx = la.expm(x * MatLanczos) @ v0
-    
-    # Reconstruct operator from Krylov basis
-    Obs_Lanczos = np.zeros((d, d), dtype=complex)
-    for l in range(L):
-        Obs_Lanczos += vecx[l] * Obs_list[l]
+        betas.append(beta)
+        q_prev = q
+        q = z / beta
+        beta_prev = beta
 
-    return norm_opt * Obs_Lanczos
+    return (
+        np.asarray(basis),
+        np.asarray(alphas, dtype=float),
+        np.asarray(betas, dtype=float),
+        norm_opt,
+    )
 
 
-# ========== 全局固定参数 ==========
-n = 6
-d = int(2**n)
-n2 = int(n*2)
-d2 = int(4**n)
-Id = np.eye(d)
-majorana_ops = generate_all_majoranas(n)
+def krylov_modular(basis, alphas, betas, norm_opt, x, m=None, shift=0.0):
+    r"""
+    exp(-shift) * exp(x ad_H)(opt) restricted to the first m Krylov vectors.
 
-# 加载哈密顿量（只加载一次，不用重复读文件）
-H0  = np.load('FF_ham.npy')
-V = np.load('Int_ham.npy')
+    T is real symmetric tridiagonal, so expm(x T) e_1 is obtained from a
+    dense symmetric eigendecomposition -- faster and better conditioned
+    than a general expm, and it lets the scalar `shift` be applied inside
+    the exponential where it cannot overflow.
+    """
+    k = len(alphas) if m is None else min(int(m), len(alphas))
+    if k == 0:
+        return np.zeros(basis.shape[1:], dtype=complex)
 
-m_list = np.array([12,24,36])
+    T = np.diag(alphas[:k])
+    if k > 1:
+        off = betas[: k - 1]
+        T += np.diag(off, 1) + np.diag(off, -1)
 
-# 构造J算子集合（只构造一次）
-SetofJ = []
-for a in range(n):
-    Xa = mycode.SingleX(a,n)
-    Za = mycode.SingleZ(a,n)
-    SetofJ.append(Xa)
-    SetofJ.append(Za)
+    w, S = la.eigh(T)
+    # expm(x T) e_1 = S diag(exp(x w)) S^T e_1
+    coefficients = S @ (np.exp(x * w - shift) * S[0, :])
 
-L = 20
-Listofbeta = np.linspace(1/L,8,L) 
+    return norm_opt * np.tensordot(coefficients, basis[:k], axes=(0, 0))
 
-# 四个不同h，循环分别计算并保存
-h_list = np.array([0.01, 0.1, 1, 10])
 
-# 外层循环遍历4个h
-for h in h_list:
-    print(f"===== 当前计算 h = {h} =====")
-    # 每个h独立初始化保真度数组，互不干扰
-    Listofnorm = np.zeros((L,4))
-    
-    # 构造当前h对应的总哈密顿量
-    FH_ham = H0 + h * V
+# ----------------------------------------------------------------------
+# Exact reference
+# ----------------------------------------------------------------------
 
-    # 遍历所有beta
-    for l in range(L):
-        print(f"beta 循环 l = {l}")
-        beta = Listofbeta[l]
-        MH = np.zeros((d2,d2),dtype = complex)
-        Id = np.eye(d)
-        
-        # 精确MH
-        
-        Ja = SetofJ[0]
-        La = la.expm(-0.25*beta*FH_ham) @ Ja @ la.expm(0.25*beta*FH_ham)
+def exact_modular(eigenvalues, eigenvectors, opt_energy, x, shift=0.0):
+    r"""
+    exp(-shift) * exp(x ad_H)(opt), from the eigendecomposition of H.
 
-        # 三个不同m的Krylov近似
-        for i in range(3):
-            m = int(m_list[i])
+    `opt_energy` = U^dag opt U is passed in precomputed because it does not
+    depend on x.  With shift = x * (lambda_max - lambda_min) every exponent
+    is <= 0, so this cannot overflow; the smallest entries underflow to
+    zero, which is harmless at the 1e-300 relative level.
+    """
+    exponent = x * (eigenvalues[:, None] - eigenvalues[None, :]) - shift
+    return eigenvectors @ (np.exp(exponent) * opt_energy) @ eigenvectors.conj().T
 
-            La_Krylov = Krylov_estimation(m, FH_ham, -0.25*beta, Ja)
-            Listofnorm[l][i] = mycode.matrix_norm(La-La_Krylov)
 
-    # 按h值命名保存npy，4个文件互不覆盖
-    save_name = f"Listofnorm_h{h}.npy"
-    np.save(save_name, Listofnorm)
-    print(f"已保存 h={h} 数据至: {save_name}\n")
+# ----------------------------------------------------------------------
+# Benchmark
+# ----------------------------------------------------------------------
+
+def main():
+    n = 6
+    d = 2 ** n
+
+    H0 = np.load("FF_ham.npy")
+    V = np.load("Int_ham.npy")
+
+    m_list = np.array([12, 24, 36])
+    m_max = int(m_list.max())
+
+    # Local Pauli operators X_a, Z_a.
+    SetofJ = []
+    for a in range(n):
+        SetofJ.append(mycode.SingleX(a, n))
+        SetofJ.append(mycode.SingleZ(a, n))
+    n_J = len(SetofJ)
+
+    L = 20
+    Listofbeta = np.linspace(1.0 / L, 8.0, L)
+    h_list = np.array([0.01, 0.1, 1.0, 10.0])
+
+    for h in h_list:
+        print(f"===== h = {h} =====", flush=True)
+
+        FH_ham = H0 + h * V
+        eig, vec = la.eigh(FH_ham)
+        width = float(eig[-1] - eig[0])       # spectral width -> ||ad_H||
+
+        # --- one Lanczos run per operator, reused for every (beta, m) ---
+        krylov_data = []
+        opt_energy = []
+        for Ja in SetofJ:
+            krylov_data.append(lanczos_tridiag(m_max, FH_ham, Ja))
+            opt_energy.append(vec.conj().T @ Ja @ vec)
+
+        rel_err = np.zeros((L, len(m_list)))
+        log10_scale = np.zeros((L, len(m_list)))   # log10 of the exact norm
+
+        for l, beta in enumerate(Listofbeta):
+            x = 0.25 * beta
+            shift = x * width                  # keeps both sides O(1)
+
+            err_tmp = np.zeros((len(m_list), n_J))
+            scale_tmp = np.zeros((len(m_list), n_J))
+
+            for a in range(n_J):
+                exact = exact_modular(eig, vec, opt_energy[a], x, shift=shift)
+                norm_exact = matrix_norm(exact)
+
+                basis, alphas, betas, norm_opt = krylov_data[a]
+
+                for i, m in enumerate(m_list):
+                    approx = krylov_modular(
+                        basis, alphas, betas, norm_opt, x, m=int(m), shift=shift
+                    )
+                    err = matrix_norm(exact - approx)
+                    err_tmp[i, a] = err / norm_exact if norm_exact > 0 else np.nan
+                    scale_tmp[i, a] = norm_exact
+
+            # Worst case over the 2n local operators.
+            worst = np.argmax(err_tmp, axis=1)
+            rel_err[l, :] = err_tmp[np.arange(len(m_list)), worst]
+            # Absolute error = rel_err * 10**log10_scale.
+            log10_scale[l, :] = (
+                np.log10(scale_tmp[np.arange(len(m_list)), worst])
+                + shift / np.log(10.0)
+            )
+
+            print(
+                f"  beta = {beta:6.3f}   rel. err = "
+                + "  ".join(f"m={m}: {e:.3e}" for m, e in zip(m_list, rel_err[l]))
+                , flush=True
+            )
+
+        # Relative error, shape (L, len(m_list)) -- same layout as before.
+        out = f"Listofnorm_h{h}.npy"
+        np.save(out, rel_err)
+
+        # log10 ||exact||_2 for the same worst-case operator, so that
+        # absolute error = rel_err * 10**log10_norm_exact.
+        # out_scale = f"Lognorm_h{h}.npy"
+        # np.save(out_scale, log10_scale)
+
+        # print(f"saved -> {out}, {out_scale}\n", flush=True)
+
+
+if __name__ == "__main__":
+    main()

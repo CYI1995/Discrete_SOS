@@ -59,7 +59,7 @@ for a in range(n2):
     for b in range(n2):
         wb = majorana_ops[b]
 
-        FF_ham += 0.5 * mh[a][b] * wa @ wb
+        FF_ham += mh[a][b] * wa @ wb
 
 Id = np.eye(d, dtype=complex)
 
