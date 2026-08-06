@@ -41,8 +41,8 @@ plt.rcParams.update({
 L = 20
 Listofbeta = np.linspace(1 / L, 8, L)
 
-Listofnorm_h01 = np.load('Listofnorm_h0.1.npy')
 Listofnorm_h001 = np.load('Listofnorm_h0.01.npy')
+Listofnorm_h01 = np.load('Listofnorm_h0.1.npy')
 Listofnorm_h1 = np.load('Listofnorm_h1.0.npy')
 Listofnorm_h10 = np.load('Listofnorm_h10.0.npy')
 
@@ -58,7 +58,7 @@ h_values = [0.01, 0.1, 1, 10]
 
 colors = ['royalblue', 'red', 'black']
 markers = ['^', 'o', 's']
-m_values = [12, 24, 36]
+m_values = [8, 16, 24]
 
 
 # ============================================================
@@ -95,7 +95,11 @@ for ax, norm, h in zip(axes.flat, datasets, h_values):
         rf'$\boldsymbol{{U={h:g}}}$'
     )
 
-    ax.legend()
+    # Put the common legend only in the fourth subplot
+    axes[1, 1].legend(
+        loc='best',
+        frameon=True,
+    )
 
     ax.tick_params(
         axis='both',
@@ -160,7 +164,7 @@ for ax in axes[:, 0]:
 fig.tight_layout()
 
 fig.savefig(
-    'Krylovapproximation.pdf',
+    'krylov_max_error.pdf',
     bbox_inches='tight',
     pad_inches=0.02,
     dpi=600,
