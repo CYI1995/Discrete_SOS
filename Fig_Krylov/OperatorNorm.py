@@ -15,10 +15,11 @@ Key structural points
   the T of a k-step run (exactly so with full reorthogonalization, since the
   recurrence at step j only ever touches basis vectors 0..j).
 * Everything is evaluated with the global factor exp(-x * W) pulled out,
-  W = lambda_max - lambda_min being the spectral width of H.  Both the exact
-  and the Krylov result carry the same factor, so the *relative* error is
-  unaffected while the intermediate matrices stay O(1) instead of
-  overflowing float64 at large beta.
+  W = lambda_max - lambda_min being the spectral width of H.  This keeps the
+  intermediate matrices O(1) instead of overflowing float64 at large beta.
+  The reported quantity is the ABSOLUTE operator-norm error, so this factor
+  does not cancel and is restored on the final scalar only, as
+  exp(log(err_shifted) + shift), which avoids forming exp(shift) itself.
 """
 
 import numpy as np
@@ -247,19 +248,16 @@ def main():
             krylov_data.append(lanczos_tridiag(m_max, FH_ham, Ja))
             opt_energy.append(vec.conj().T @ Ja @ vec)
 
-        rel_err = np.zeros((L, len(m_list)))
-        log10_scale = np.zeros((L, len(m_list)))   # log10 of the exact norm
+        abs_err = np.zeros((L, len(m_list)))
 
         for l, beta in enumerate(Listofbeta):
             x = 0.25 * beta
             shift = x * width                  # keeps both sides O(1)
 
             err_tmp = np.zeros((len(m_list), n_J))
-            scale_tmp = np.zeros((len(m_list), n_J))
 
             for a in range(n_J):
                 exact = exact_modular(eig, vec, opt_energy[a], x, shift=shift)
-                norm_exact = matrix_norm(exact)
 
                 basis, alphas, betas, norm_opt = krylov_data[a]
 
@@ -267,35 +265,28 @@ def main():
                     approx = krylov_modular(
                         basis, alphas, betas, norm_opt, x, m=int(m), shift=shift
                     )
-                    err = matrix_norm(exact - approx)
-                    err_tmp[i, a] = err / norm_exact if norm_exact > 0 else np.nan
-                    scale_tmp[i, a] = norm_exact
+                    err_shifted = matrix_norm(exact - approx)
+
+                    # Absolute error = err_shifted * exp(shift).  Formed in
+                    # log space so that exp(shift) is never built on its own.
+                    if err_shifted > 0.0:
+                        with np.errstate(over="ignore"):
+                            err_tmp[i, a] = np.exp(np.log(err_shifted) + shift)
+                    else:
+                        err_tmp[i, a] = 0.0
 
             # Worst case over the 2n local operators.
-            worst = np.argmax(err_tmp, axis=1)
-            rel_err[l, :] = err_tmp[np.arange(len(m_list)), worst]
-            # Absolute error = rel_err * 10**log10_scale.
-            log10_scale[l, :] = (
-                np.log10(scale_tmp[np.arange(len(m_list)), worst])
-                + shift / np.log(10.0)
-            )
+            abs_err[l, :] = err_tmp.max(axis=1)
 
             print(
-                f"  beta = {beta:6.3f}   rel. err = "
-                + "  ".join(f"m={m}: {e:.3e}" for m, e in zip(m_list, rel_err[l]))
+                f"  beta = {beta:6.3f}   abs. err = "
+                + "  ".join(f"m={m}: {e:.3e}" for m, e in zip(m_list, abs_err[l]))
                 , flush=True
             )
 
-        # Relative error, shape (L, len(m_list)) -- same layout as before.
+        # Absolute error, shape (L, len(m_list)) -- same layout as before.
         out = f"Listofnorm_h{h}.npy"
-        np.save(out, rel_err)
-
-        # log10 ||exact||_2 for the same worst-case operator, so that
-        # absolute error = rel_err * 10**log10_norm_exact.
-        # out_scale = f"Lognorm_h{h}.npy"
-        # np.save(out_scale, log10_scale)
-
-        # print(f"saved -> {out}, {out_scale}\n", flush=True)
+        np.save(out, abs_err)
 
 
 if __name__ == "__main__":
