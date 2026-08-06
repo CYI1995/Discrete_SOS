@@ -41,7 +41,7 @@ def generate_all_majoranas(n_sites):
         
     return majoranas
 
-n = 6
+n = 4
 n2 = int(2*n)
 d = int(2**n)
 d2 = int(2**n2)
