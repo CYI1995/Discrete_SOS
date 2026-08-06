@@ -37,7 +37,7 @@ import scipy.linalg as la
 import source as mycode
 
 # ========== 全局固定参数 ==========
-n = 4
+n = 6
 d = int(2 ** n)
 n2 = int(n * 2)
 d2 = int(4 ** n)
