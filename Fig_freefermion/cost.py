@@ -43,9 +43,9 @@ def compare_gaps_vs_beta(beta_list, mh):
         M_opt = 4 * np.sum(List_for_Sopt)
         gap_opt = 2 * np.min(List_for_Sopt)
 
-        cost_SGauss.append(beta * math.sqrt(M_Gauss/gap_Gauss))
-        cost_SI.append(beta * math.sqrt(M_I/gap_I))
-        cost_Sopt.append(beta * math.sqrt(M_opt/gap_opt))
+        cost_SGauss.append(beta * math.sqrt(M_Gauss/(2*gap_Gauss)))
+        cost_SI.append(beta * math.sqrt(M_I/(2*gap_I)))
+        cost_Sopt.append(beta * math.sqrt(M_opt/(2*gap_opt)))
 
     return {
         "beta": np.array(beta_list),
