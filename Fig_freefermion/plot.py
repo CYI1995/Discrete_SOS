@@ -681,7 +681,7 @@ ax_top.legend(
 # ============================================================
 
 ax_bottom.set_title(
-    r"$\boldsymbol{\mathrm{(b)\ Mixing\ comparison}}$"
+    r"$\boldsymbol{\mathrm{(b)\ Relaxation\ comparison}}$"
 )
 
 ax_bottom.plot(
