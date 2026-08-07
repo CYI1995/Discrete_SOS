@@ -256,7 +256,7 @@ def build_parent_hamiltonian(left_stack):
     parent -= D
     parent -= D.conj().T
 
-    return hermitian_part(parent)
+    return 0.5*hermitian_part(parent)
 
 
 def exact_purified_gibbs_vector(energies, eigenvectors, beta):
