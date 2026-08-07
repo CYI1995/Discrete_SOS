@@ -1,7 +1,8 @@
 """
 Krylov (Lanczos) approximation of the modular flow
 
-    Delta^{s}(J) = exp(x ad_H)(J),   ad_H(X) = H X - X H,   x = beta/4,
+    Delta^{s}(J) = exp(x_s ad_H)(J),   ad_H(X) = H X - X H,
+    x_s = s * beta/4,   s in {+1, -1},
 
 benchmarked against the exact eigendecomposition result.
 
@@ -14,7 +15,7 @@ Key structural points
 * Lanczos is nested: the leading k x k block of T from an m-step run equals
   the T of a k-step run (exactly so with full reorthogonalization, since the
   recurrence at step j only ever touches basis vectors 0..j).
-* Everything is evaluated with the global factor exp(-x * W) pulled out,
+* Everything is evaluated with the global factor exp(-|x| * W) pulled out,
   W = lambda_max - lambda_min being the spectral width of H.  This keeps the
   intermediate matrices O(1) instead of overflowing float64 at large beta.
   The reported quantity is the ABSOLUTE operator-norm error, so this factor
@@ -201,7 +202,7 @@ def exact_modular(eigenvalues, eigenvectors, opt_energy, x, shift=0.0):
     exp(-shift) * exp(x ad_H)(opt), from the eigendecomposition of H.
 
     `opt_energy` = U^dag opt U is passed in precomputed because it does not
-    depend on x.  With shift = x * (lambda_max - lambda_min) every exponent
+    depend on x.  With shift = |x| * (lambda_max - lambda_min) every exponent
     is <= 0, so this cannot overflow; the smallest entries underflow to
     zero, which is harmless at the 1e-300 relative level.
     """
@@ -286,35 +287,57 @@ def main():
             krylov_data.append(lanczos_tridiag(m_max, FH_ham, Ja))
             opt_energy.append(vec.conj().T @ Ja @ vec)
 
+        # True epsilon_max(beta, m) = max_{a, s=+/-1}
+        # ||Delta^s(J_a) - K_m(ad_H, J_a; s beta/4)||_2.
         abs_err = np.zeros((L, len(m_list)))
 
         for l, beta in enumerate(Listofbeta):
-            x = 0.25 * beta
-            shift = x * width                  # keeps both sides O(1)
+            # err_tmp[i, a, sigma] stores the absolute operator-norm error
+            # for Krylov dimension m_list[i], generator J_a, and
+            # sigma = 0/1 corresponding to s = -1/+1.
+            err_tmp = np.zeros((len(m_list), n_J, 2))
 
-            err_tmp = np.zeros((len(m_list), n_J))
+            for sigma, sgn in enumerate((-1.0, +1.0)):
+                x = sgn * 0.25 * beta
 
-            for a in range(n_J):
-                exact = exact_modular(eig, vec, opt_energy[a], x, shift=shift)
+                # For either sign of x,
+                #   max_{i,j} x(E_i-E_j) = |x| (E_max-E_min).
+                # Subtracting this nonnegative shift keeps every exact and
+                # projected exponential bounded by one.
+                shift = abs(x) * width
 
-                basis, alphas, betas, norm_opt = krylov_data[a]
-
-                for i, m in enumerate(m_list):
-                    approx = krylov_modular(
-                        basis, alphas, betas, norm_opt, x, m=int(m), shift=shift
+                for a in range(n_J):
+                    exact = exact_modular(
+                        eig, vec, opt_energy[a], x, shift=shift
                     )
-                    err_shifted = matrix_norm(exact - approx)
 
-                    # Absolute error = err_shifted * exp(shift).  Formed in
-                    # log space so that exp(shift) is never built on its own.
-                    if err_shifted > 0.0:
-                        with np.errstate(over="ignore"):
-                            err_tmp[i, a] = np.exp(np.log(err_shifted) + shift)
-                    else:
-                        err_tmp[i, a] = 0.0
+                    basis, alphas, betas, norm_opt = krylov_data[a]
 
-            # Worst case over the 2n local operators.
-            abs_err[l, :] = err_tmp.max(axis=1)
+                    for i, m in enumerate(m_list):
+                        approx = krylov_modular(
+                            basis,
+                            alphas,
+                            betas,
+                            norm_opt,
+                            x,
+                            m=int(m),
+                            shift=shift,
+                        )
+                        err_shifted = matrix_norm(exact - approx)
+
+                        # The unshifted absolute error is
+                        # err_shifted * exp(shift). Evaluate it in log space
+                        # so exp(shift) is never formed separately.
+                        if err_shifted > 0.0:
+                            log_abs_err = np.log(err_shifted) + shift
+                            with np.errstate(over="ignore", under="ignore"):
+                                err_tmp[i, a, sigma] = np.exp(log_abs_err)
+                        else:
+                            err_tmp[i, a, sigma] = 0.0
+
+            # True worst case over all local generators and both modular
+            # directions s = +/-1.
+            abs_err[l, :] = err_tmp.max(axis=(1, 2))
 
             print(
                 f"  beta = {beta:6.3f}   abs. err = "
@@ -322,7 +345,7 @@ def main():
                 , flush=True
             )
 
-        # Absolute error, shape (L, len(m_list)) -- same layout as before.
+        # True epsilon_max, shape (L, len(m_list)) -- same layout as before.
         out = f"Listofnorm_h{h}.npy"
         np.save(out, abs_err)
 

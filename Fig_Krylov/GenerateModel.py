@@ -50,7 +50,7 @@ majorana_ops = generate_all_majoranas(n)
 
 mh = np.random.normal(0,1, size = (n2,n2))
 mh = 1j * (mh - mh.T)
-mh_norm = la.norm(mh,2)
+mh_norm = la.norm(mh,1)
 mh = mh/mh_norm
 
 FF_ham = np.zeros((d,d),dtype = complex)
