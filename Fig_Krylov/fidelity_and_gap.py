@@ -108,6 +108,8 @@ import scipy.linalg as la
 # Parameters
 # ==============================================================
 
+H0 = np.load('FF_ham.npy')
+interaction = np.load('Int_ham.npy')
 
 M_LIST = (8, 16, 24)
 H_LIST = (0.01, 0.1, 1.0, 10.0)
@@ -167,46 +169,6 @@ def build_generators(number_of_qubits):
 def hermitian_part(M):
     """Drop the roundoff-level anti-Hermitian part."""
     return 0.5 * (M + M.conj().T)
-
-
-def load_model_hamiltonians(number_of_qubits):
-    """
-    Load H0 from FF_ham.npy and V from Int_ham.npy.
-
-    Both must be square of size 2**number_of_qubits and Hermitian to
-    round-off.  The anti-Hermitian remainder is then dropped so that
-    la.eigh and the Lanczos precondition are exact.
-    """
-    dimension = 2 ** number_of_qubits
-    loaded = {}
-
-    for name, path in (("H0", FF_HAM_PATH), ("V", INT_HAM_PATH)):
-        if not path.exists():
-            raise FileNotFoundError(
-                f"{path} not found in {path.resolve().parent}."
-            )
-
-        M = np.asarray(np.load(path), dtype=complex)
-
-        if M.shape != (dimension, dimension):
-            raise ValueError(
-                f"{path}: shape {M.shape} != {(dimension, dimension)}; "
-                f"N_QUBITS = {number_of_qubits} does not match the file."
-            )
-
-        asymmetry = la.norm(M - M.conj().T, ord="fro") / max(
-            1.0, la.norm(M, ord="fro")
-        )
-        if asymmetry > HERMITICITY_TOL:
-            raise ValueError(
-                f"{path}: relative anti-Hermitian part {asymmetry:.3e} "
-                f"exceeds {HERMITICITY_TOL:.0e}."
-            )
-
-        loaded[name] = hermitian_part(M)
-        print(f"  loaded {name} from {path} ({M.shape[0]}x{M.shape[1]})", flush=True)
-
-    return loaded["H0"], loaded["V"]
 
 
 def hs_inner_product(A, B):
@@ -342,7 +304,7 @@ def build_parent_hamiltonian(left_stack):
     parent = np.kron(A, identity) + np.kron(identity, A.T)
     parent -= D
     parent -= D.conj().T
-    return hermitian_part(parent)
+    return 0.5*hermitian_part(parent)
 
 
 def exact_purified_gibbs_vector(energies, eigenvectors, beta):
@@ -439,7 +401,6 @@ def checked_ground_state(parent, shift):
 def compute_results():
     """Compute every curve; see the module docstring for the output layout."""
     print("Loading Hamiltonians:", flush=True)
-    H0, interaction = load_model_hamiltonians(N_QUBITS)
     generators = build_generators(N_QUBITS)
     maximum_order = max(M_LIST)
 
